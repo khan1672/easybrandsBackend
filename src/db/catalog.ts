@@ -1,6 +1,7 @@
 import type { Env } from '../config/env.js';
 import type { ProductDoc } from '../types.js';
-import { foldCategories } from './categoryTaxonomy.js';
+import { foldCategories, canonicalCategory } from './categoryTaxonomy.js';
+import { compareBySort, matchesScope, normaliseBrands, type Facets, type SortKey } from './productFilters.js';
 import { ProductStore } from './store.js';
 
 /**
@@ -11,8 +12,13 @@ import { ProductStore } from './store.js';
  */
 export interface BrowseOpts {
   brand?: string;
+  /** Multi-brand selection; takes precedence over `brand` when both are given. */
+  brands?: string[];
   category?: string;
   availableOnly?: boolean;
+  minPrice?: number;
+  maxPrice?: number;
+  sort?: SortKey;
 }
 
 export interface BrowseResult<T> {
@@ -47,6 +53,13 @@ export interface Catalog {
   search(q: string, opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>>;
   brands(page: number, limit: number): Promise<BrowseResult<BrandRow>>;
   categories(page: number, limit: number): Promise<BrowseResult<CategoryRow>>;
+  /**
+   * Brand counts and a price range for the current scope, so a client can show
+   * filter options without downloading the whole category. Brand/price
+   * selections are deliberately ignored here: a facet must describe what can
+   * still be chosen.
+   */
+  facets(opts: BrowseOpts): Promise<Facets>;
   close(): Promise<void>;
 }
 
@@ -77,24 +90,62 @@ export class JsonlCatalog implements Catalog {
     return this.store.bySlug(slug, brand);
   }
 
-  async browse(opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>> {
-    const ids = this.store.browseRows(opts);
-    const items = slice(
-      ids.map((i) => this.store.docs[i]).filter((d): d is ProductDoc => Boolean(d)),
-      page,
-      limit,
+  /**
+   * Candidate rows for a scope. The store indexes a single brand plus the raw
+   * category string, so a multi-brand or canonical-category scope falls back to
+   * a scan and is then filtered in memory like any other predicate.
+   */
+  private scopeRows(opts: BrowseOpts): number[] {
+    const brands = normaliseBrands(opts.brands ?? (opts.brand ? [opts.brand] : undefined));
+    const multiBrand = brands.length > 1;
+    const canonicalRequest = Boolean(
+      opts.category && canonicalCategory(opts.category) !== opts.category.trim(),
     );
-    return { paging: pagingOf(page, limit, ids.length), items };
+    if (!multiBrand && !canonicalRequest) {
+      return this.store.browseRows({
+        brand: brands[0],
+        category: opts.category,
+        availableOnly: opts.availableOnly,
+      });
+    }
+    return this.store.docs.map((_, i) => i);
+  }
+
+  private inScope(opts: BrowseOpts, id: number): boolean {
+    const doc = this.store.docs[id];
+    if (!doc) return false;
+    const brands = normaliseBrands(opts.brands ?? (opts.brand ? [opts.brand] : undefined));
+    const scope = {
+      brands,
+      availableOnly: opts.availableOnly,
+      minPrice: opts.minPrice,
+      maxPrice: opts.maxPrice,
+    };
+    if (!matchesScope(doc, scope)) return false;
+    if (opts.category && canonicalCategory(opts.category) !== canonicalCategory(doc.category)) {
+      return false;
+    }
+    return true;
+  }
+
+  async browse(opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>> {
+    const candidates = this.scopeRows(opts);
+    const matched = candidates.filter((id) => this.inScope(opts, id));
+    const docs = matched
+      .map((i) => this.store.docs[i])
+      .filter((d): d is ProductDoc => Boolean(d))
+      .sort(compareBySort(opts.sort ?? 'price_asc'));
+    return { paging: pagingOf(page, limit, docs.length), items: slice(docs, page, limit) };
   }
 
   async search(q: string, opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>> {
     const ids = this.store.searchRows(q, opts.brand, opts.availableOnly !== false);
-    const items = slice(
-      ids.map((i) => this.store.docs[i]).filter((d): d is ProductDoc => Boolean(d)),
-      page,
-      limit,
-    );
-    return { paging: pagingOf(page, limit, ids.length), items };
+    const docs = ids
+      .filter((id) => this.inScope(opts, id))
+      .map((i) => this.store.docs[i])
+      .filter((d): d is ProductDoc => Boolean(d))
+      .sort(compareBySort(opts.sort ?? 'price_asc'));
+    return { paging: pagingOf(page, limit, docs.length), items: slice(docs, page, limit) };
   }
 
   async brands(
@@ -124,6 +175,36 @@ export class JsonlCatalog implements Catalog {
       })),
     );
     return { paging: pagingOf(page, limit, all.length), items: slice(all, page, limit) };
+  }
+
+  async facets(opts: BrowseOpts): Promise<Facets> {
+    // Brand/price selections are excluded on purpose: a facet describes what is
+    // still selectable, not what the current selection already narrowed to.
+    const scope: BrowseOpts = { category: opts.category, availableOnly: opts.availableOnly };
+    const counts = new Map<string, number>();
+    let min = Number.POSITIVE_INFINITY;
+    let max = 0;
+    let total = 0;
+    for (const id of this.scopeRows(scope)) {
+      if (!this.inScope(scope, id)) continue;
+      const doc = this.store.docs[id];
+      if (!doc) continue;
+      total += 1;
+      const brand = String(doc.brand_name || '').trim();
+      if (brand) counts.set(brand, (counts.get(brand) ?? 0) + 1);
+      const price = Number(doc.price);
+      if (Number.isFinite(price) && price > 0) {
+        if (price < min) min = price;
+        if (price > max) max = price;
+      }
+    }
+    return {
+      brands: [...counts.entries()]
+        .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+      price: { min: Number.isFinite(min) ? min : 0, max },
+      total,
+    };
   }
 
   async close(): Promise<void> {

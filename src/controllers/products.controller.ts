@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import type { Catalog, BrowseOpts } from '../db/catalog.js';
+import { isSortKey, normaliseBrands, DEFAULT_SORT, type SortKey } from '../db/productFilters.js';
 import type { ProductDoc } from '../types.js';
 
 function availableOnlyFrom(value: unknown): boolean {
@@ -15,10 +16,36 @@ function limitFrom(value: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.min(n, 200) : 50;
 }
 
+function numberFrom(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function scopeFrom(req: Request): BrowseOpts {
   const brand = req.query.brand ? String(req.query.brand).trim() : undefined;
   const category = req.query.category ? String(req.query.category).trim() : undefined;
-  return { brand, category, availableOnly: availableOnlyFrom(req.query.available) };
+  // `brand` may repeat or be comma-separated: ?brand=Edenrobe,HSY
+  const repeated = Array.isArray(req.query.brand) ? req.query.brand.map(String) : undefined;
+  const brands = normaliseBrands(repeated ?? brand);
+  const sort: SortKey = isSortKey(req.query.sort) ? req.query.sort : DEFAULT_SORT;
+  return {
+    brand,
+    ...(brands.length > 0 ? { brands } : {}),
+    category,
+    availableOnly: availableOnlyFrom(req.query.available),
+    minPrice: numberFrom(req.query.minPrice),
+    maxPrice: numberFrom(req.query.maxPrice),
+    sort,
+  };
+}
+
+/** Filter options for the scope a client is browsing. */
+export function productFacets({ catalog }: { catalog: Catalog }) {
+  return async (req: Request, res: Response) => {
+    const facets = await catalog.facets(scopeFrom(req));
+    return res.json(facets);
+  };
 }
 
 export function getProduct({ catalog }: { catalog: Catalog }) {

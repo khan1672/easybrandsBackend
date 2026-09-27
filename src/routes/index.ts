@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Catalog } from '../db/catalog.js';
-import { getProduct, browseProducts, searchProducts } from '../controllers/products.controller.js';
+import { getProduct, browseProducts, searchProducts, productFacets } from '../controllers/products.controller.js';
 import { listBrands } from '../controllers/brands.controller.js';
 import { listCategories } from '../controllers/categories.controller.js';
 import { health } from '../controllers/health.controller.js';
@@ -13,6 +13,8 @@ export function createRouter(ctx: { catalog: Catalog }) {
   r.get('/categories', listCategories(ctx));
   r.get('/products', browseProducts(ctx));
   r.get('/products/search', searchProducts(ctx));
+  // Must precede '/products/:slug', otherwise 'facets' is read as a slug.
+  r.get('/products/facets', productFacets(ctx));
   r.get('/products/:slug', getProduct(ctx));
 
   return r;

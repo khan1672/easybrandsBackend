@@ -2,6 +2,8 @@ import type { Catalog, BrowseOpts, BrowseResult, CategoryRow } from './catalog.j
 import type { ProductDoc } from '../types.js';
 import { buildMongoCollection, type MongoContext } from './mongo.js';
 import { canonicalCategory, foldCategories, type RawCategoryTally } from './categoryTaxonomy.js';
+import { scopeFilter, type Facets } from './productFilters.js';
+import type { SortKey } from './productFilters.js';
 
 /**
  * MongoDB-backed catalog. This is the source of truth when MONGO_URI is set:
@@ -57,11 +59,23 @@ export class MongoCatalog implements Catalog {
   }
 
   private async browseFilter(opts: BrowseOpts): Promise<Record<string, unknown>> {
-    const filter: Record<string, unknown> = {};
-    if (opts.brand) filter.brand_name = String(opts.brand).trim();
+    const filter: Record<string, unknown> = {
+      ...scopeFilter({
+        brands: opts.brands ?? (opts.brand ? [opts.brand] : undefined),
+        minPrice: opts.minPrice,
+        maxPrice: opts.maxPrice,
+        availableOnly: opts.availableOnly,
+      }),
+    };
     if (opts.category) Object.assign(filter, await this.categoryFilter(opts.category));
-    if (opts.availableOnly !== false) filter.available = { $ne: false };
     return filter;
+  }
+
+  /** Mongo sort document for a `SortKey`, keeping priceless products last. */
+  private sortStage(sort: SortKey | undefined): Record<string, 1 | -1> {
+    if (sort === 'name_asc') return { title: 1, handle: 1 };
+    if (sort === 'price_desc') return { __sortPrice: -1, _id: 1 };
+    return { __sortPrice: 1, _id: 1 };
   }
 
   async browse(opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>> {
@@ -73,7 +87,7 @@ export class MongoCatalog implements Catalog {
         // Products with no real price must sort last, not first (Mongo sorts
         // missing/null before numbers on an ascending price sort).
         { $addFields: { __sortPrice: { $cond: [{ $gt: [{ $ifNull: ['$price', 0] }, 0] }, '$price', 1e15] } } },
-        { $sort: { __sortPrice: 1, _id: 1 } },
+        { $sort: this.sortStage(opts.sort) },
         { $skip: (page - 1) * limit },
         { $limit: limit },
         { $project: { __sortPrice: 0 } },
@@ -97,16 +111,23 @@ export class MongoCatalog implements Catalog {
       ],
     }));
     const filter: Record<string, unknown> = { $and: and };
-    if (opts.brand) filter.brand_name = String(opts.brand).trim();
+    Object.assign(
+      filter,
+      scopeFilter({
+        brands: opts.brands ?? (opts.brand ? [opts.brand] : undefined),
+        minPrice: opts.minPrice,
+        maxPrice: opts.maxPrice,
+        availableOnly: opts.availableOnly,
+      }),
+    );
     if (opts.category) Object.assign(filter, await this.categoryFilter(opts.category));
-    if (opts.availableOnly !== false) filter.available = { $ne: false };
 
     const total = await this.col.countDocuments(filter);
     const docs = (await this.col
       .aggregate([
         { $match: filter },
         { $addFields: { __sortPrice: { $cond: [{ $gt: [{ $ifNull: ['$price', 0] }, 0] }, '$price', 1e15] } } },
-        { $sort: { __sortPrice: 1, _id: 1 } },
+        { $sort: this.sortStage(opts.sort) },
         { $skip: (page - 1) * limit },
         { $limit: limit },
         { $project: { __sortPrice: 0 } },
@@ -149,6 +170,43 @@ export class MongoCatalog implements Catalog {
     return {
       paging: { page, limit, offset, total: withAvailable.length },
       items: withAvailable.slice(offset, offset + limit),
+    };
+  }
+
+  async facets(opts: BrowseOpts): Promise<Facets> {
+    // Brand and price selections are intentionally ignored: a facet must list
+    // what can still be chosen, not what the current selection already cut down.
+    const filter: Record<string, unknown> = { available: { $ne: false } };
+    if (opts.category) Object.assign(filter, await this.categoryFilter(opts.category));
+
+    const [brandRows, bounds] = await Promise.all([
+      this.col
+        .aggregate([
+          { $match: filter },
+          { $group: { _id: '$brand_name', count: { $sum: 1 } } },
+          { $match: { _id: { $type: 'string', $ne: '' } } },
+          { $sort: { count: -1, _id: 1 } },
+        ])
+        .toArray() as Promise<{ _id: string; count: number }[]>,
+      this.col
+        .aggregate([
+          { $match: filter },
+          { $group: { _id: null, min: { $min: '$price' }, max: { $max: '$price' }, total: { $sum: 1 } } },
+        ])
+        .toArray() as Promise<
+          { _id: null; min: number | null; max: number | null; total: number }[]
+        >,
+    ]);
+
+    const row = bounds[0];
+    const min = Number(row?.min ?? 0);
+    const max = Number(row?.max ?? 0);
+    return {
+      brands: brandRows.map((b) => ({ name: b._id, count: b.count })),
+      // A category can legitimately contain only priceless products, in which
+      // case there is no meaningful range to offer.
+      price: { min: Number.isFinite(min) ? min : 0, max: Number.isFinite(max) ? max : 0 },
+      total: row?.total ?? 0,
     };
   }
 

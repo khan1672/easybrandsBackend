@@ -128,11 +128,27 @@ const JUNK = new Set([
   'other-acc',
 ]);
 
+/**
+ * Canonical names mapped through `normaliseCategory`.
+ *
+ * `canonicalCategory` must be idempotent: filtering by a name the API itself
+ * advertises has to return that category, never a different bucket. Without
+ * this, "Shirts & Tops" matched neither `/t-?shirt/` (which needs a leading
+ * `t`) nor `/^(shirt|…)$/` (anchored to the singular), fell through to
+ * `OTHERS`, and `?category=Shirts & Tops` silently returned the whole Others
+ * bucket.
+ */
+const CANONICAL_BY_NORMALISED = new Map<string, CanonicalCategory>(
+  CATEGORIES.map(name => [normaliseCategory(name), name]),
+);
+
 /** Map one raw `product.category` value to its canonical bucket. */
 export const canonicalCategory = (raw: string | null | undefined): CanonicalCategory => {
   const value = normaliseCategory(raw);
   if (!value) return OTHERS;
   if (JUNK.has(value)) return OTHERS;
+  const exact = CANONICAL_BY_NORMALISED.get(value);
+  if (exact) return exact;
   for (const rule of RULES) {
     if (rule.pattern.test(value)) return rule.canonical;
   }
