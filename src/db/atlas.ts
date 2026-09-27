@@ -12,8 +12,7 @@ export async function atlasSummary(env: Pick<Env, 'mongoUri' | 'mongoDb' | 'mong
   if (!env.mongoUri) return null;
   try {
     /* mongodb driver is an optional runtime dep (never installed by default) */
-    // @ts-expect-error -- mongodb is optional; never bundled unless MONGO_URI is set
-    const { MongoClient } = await import('mongodb');
+      const { MongoClient } = await import('mongodb');
     const client = new MongoClient(env.mongoUri, { serverSelectionTimeoutMS: 900 });
     await client.connect();
     const count = await client.db(env.mongoDb).collection(env.mongoCollection).countDocuments();

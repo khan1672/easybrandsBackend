@@ -18,6 +18,7 @@ export interface ProductDoc {
 export interface BrandSummary {
   brand_name: string;
   website?: string;
+  image?: string;
   products: number;
   available: number;
   categories: number;
@@ -28,4 +29,12 @@ export interface Paging {
   limit: number;
   offset: number;
   total: number;
+}
+
+
+export interface MirrorSummary {
+  mode: 'off' | 'mirror';
+  reachable: boolean;
+  docs?: number;
+  reason?: string;
 }

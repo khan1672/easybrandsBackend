@@ -1,16 +1,16 @@
 import type { Request, Response } from 'express';
-import type { ProductStore } from '../db/store.js';
-import type { AtlasSummary } from '../db/atlas.js';
+import type { Catalog } from '../db/catalog.js';
 
-export function health({ store, atlas }: { store: ProductStore; atlas: AtlasSummary | null }) {
-  return (_req: Request, res: Response) => {
+export function health({ catalog }: { catalog: Catalog }) {
+  return async (_req: Request, res: Response) => {
+    const [docs, brands] = await Promise.all([catalog.count(), catalog.brandCount()]);
     res.json({
       ok: true,
-      docs: store.count,
-      products: store.count,
-      brands: store.brands().length,
+      docs,
+      products: docs,
+      brands,
       bootedAt: new Date().toISOString(),
-      atlas: atlas?.reachable ? 'online' : 'offline',
+      source: catalog.source,
     });
   };
 }

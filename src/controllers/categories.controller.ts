@@ -10,13 +10,22 @@ function limitFrom(value: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.min(n, 200) : 50;
 }
 
-export function listBrands({ catalog }: { catalog: Catalog }) {
+/**
+ * GET /api/v1/categories — product categories, not brands.
+ *
+ * Merchants label products with their own Shopify `product_type`, which yields
+ * 192 raw values for our catalogue. These are folded into the canonical set in
+ * db/categoryTaxonomy.ts, so the app gets a stable, short list with product
+ * counts and a cover image. The same names work as a `?category=` filter on
+ * /products, which is why the client can navigate straight from a tile.
+ */
+export function listCategories({ catalog }: { catalog: Catalog }) {
   return async (req: Request, res: Response) => {
     const page = pageFrom(req.query.page);
     const limit = limitFrom(req.query.limit);
-    const result = await catalog.brands(page, limit);
+    const result = await catalog.categories(page, limit);
     res.json({ paging: result.paging, items: result.items });
   };
 }
 
-export default listBrands;
+export default listCategories;

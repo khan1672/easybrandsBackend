@@ -126,15 +126,18 @@ export class ProductStore {
       if (!key) continue;
       let row = map.get(key);
       if (!row) {
-        row = { brand_name: key, website: String(d.website || ''), products: 0, available: 0, categories: 0, cats: new Set() };
+        row = { brand_name: key, website: String(d.website || ''), image: '', products: 0, available: 0, categories: 0, cats: new Set() };
         map.set(key, row);
+      }
+      if (!row.image && typeof d.primary_image === 'string' && d.primary_image.trim()) {
+        row.image = d.primary_image.trim();
       }
       row.products += 1;
       if (d.available !== false) row.available += 1;
       if (d.category) row.cats.add(String(d.category).trim());
     }
     return [...map.values()]
-      .map((r) => ({ brand_name: r.brand_name, website: r.website, products: r.products, available: r.available, categories: r.cats.size }))
+      .map((r) => ({ brand_name: r.brand_name, website: r.website, image: r.image, products: r.products, available: r.available, categories: r.cats.size }))
       .sort((a, b) => a.brand_name.localeCompare(b.brand_name));
   }
 }
