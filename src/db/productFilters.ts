@@ -27,6 +27,14 @@ const byName = (a: ProductDoc, b: ProductDoc): number =>
 
 export const compareBySort = (sort: SortKey) => (a: ProductDoc, b: ProductDoc): number => {
   if (sort === 'name_asc') return byName(a, b);
+  // Products with no usable price go last in *both* directions. Ranking them
+  // with a sentinel number cannot work: under a descending sort the sentinel
+  // becomes the largest value and drags them to the very top, so a
+  // "most expensive" list would open with "Price on request". Decide the group
+  // first, then the direction.
+  const pricedA = Number.isFinite(Number(a.price)) && Number(a.price) > 0;
+  const pricedB = Number.isFinite(Number(b.price)) && Number(b.price) > 0;
+  if (pricedA !== pricedB) return pricedA ? -1 : 1;
   const pa = priceOf(a);
   const pb = priceOf(b);
   if (pa !== pb) return sort === 'price_desc' ? pb - pa : pa - pb;

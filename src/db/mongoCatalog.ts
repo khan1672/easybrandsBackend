@@ -77,11 +77,18 @@ export class MongoCatalog implements Catalog {
     return filter;
   }
 
-  /** Mongo sort document for a `SortKey`, keeping priceless products last. */
+  /**
+   * Mongo sort document for a `SortKey`, keeping priceless products last.
+   *
+   * `__hasPrice` is sorted descending first and unconditionally, so priceless
+   * documents sink to the end whichever price direction was asked for. A
+   * sentinel price cannot do this: under `-1` the sentinel is the biggest value
+   * and would float them to the top instead.
+   */
   private sortStage(sort: SortKey | undefined): Record<string, 1 | -1> {
     if (sort === 'name_asc') return { title: 1, handle: 1 };
-    if (sort === 'price_desc') return { __sortPrice: -1, _id: 1 };
-    return { __sortPrice: 1, _id: 1 };
+    if (sort === 'price_desc') return { __hasPrice: -1, __sortPrice: -1, _id: 1 };
+    return { __hasPrice: -1, __sortPrice: 1, _id: 1 };
   }
 
   async browse(opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>> {
@@ -90,13 +97,18 @@ export class MongoCatalog implements Catalog {
     const docs = (await this.col
       .aggregate([
         { $match: filter },
-        // Products with no real price must sort last, not first (Mongo sorts
-        // missing/null before numbers on an ascending price sort).
-        { $addFields: { __sortPrice: { $cond: [{ $gt: [{ $ifNull: ['$price', 0] }, 0] }, '$price', 1e15] } } },
+        // Mongo orders missing/null before numbers, so the price is split into
+        // a "has a price" flag and the value, and the flag is sorted first.
+        {
+          $addFields: {
+            __hasPrice: { $cond: [{ $gt: [{ $ifNull: ['$price', 0] }, 0] }, 1, 0] },
+            __sortPrice: { $ifNull: ['$price', 0] },
+          },
+        },
         { $sort: this.sortStage(opts.sort) },
         { $skip: (page - 1) * limit },
         { $limit: limit },
-        { $project: { __sortPrice: 0 } },
+        { $project: { __sortPrice: 0, __hasPrice: 0 } },
       ])
       .toArray()) as ProductDoc[];
     return { paging: { page, limit, offset: (page - 1) * limit, total }, items: docs };
