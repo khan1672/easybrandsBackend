@@ -113,8 +113,27 @@ export interface FacetBrand {
   count: number;
 }
 
+export interface FacetCategory {
+  /** Canonical category name, e.g. "Ready to Wear". Safe to send back as ?category=. */
+  name: string;
+  slug: string;
+  count: number;
+}
+
 export interface Facets {
+  /**
+   * Every brand that can still be chosen, regardless of the brand currently
+   * selected. Deliberately unscoped by brand: collapsing this list to the
+   * active brand would leave the shopper with nothing to switch to.
+   */
   brands: FacetBrand[];
+  /**
+   * Categories available in the current scope, folded to canonical names and
+   * scoped to the selected brand, so a brand page only offers categories that
+   * brand actually sells.
+   */
+  categories: FacetCategory[];
   price: { min: number; max: number };
+  /** Products in the current scope, delisted links excluded. */
   total: number;
 }

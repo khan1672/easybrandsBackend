@@ -39,6 +39,15 @@ export class ProductStore {
         if (arr) arr.push(id);
         else this.browse.set(key, [id]);
       };
+      // An empty brand or category segment is the wildcard for "any", so a
+      // scope with no brand (a global facets call, or browsing one category
+      // across all brands) is still a single index hit instead of a miss.
+      push(`||0`, i);
+      if (d.available !== false) push(`||1`, i);
+      if (catKey) {
+        push(`|${catKey}|0`, i);
+        if (d.available !== false) push(`|${catKey}|1`, i);
+      }
       push(`${brandKey}||0`, i);
       if (d.available !== false) push(`${brandKey}||1`, i);
       if (catKey) {
@@ -76,6 +85,20 @@ export class ProductStore {
     const hit = this.slugIndex.get(`${b}:${hKey}`);
     if (hit === undefined) return null;
     return this.docs[hit] ?? null;
+  }
+
+  /**
+   * True when `category` is stored verbatim for this brand.
+   *
+   * The browse index is keyed by the raw `category` value, but callers send
+   * canonical names ("Ready to Wear" for raw "RTW"), so a raw-key lookup can
+   * legitimately miss. Callers use this to decide whether the fast path is
+   * safe or whether they must fall back to a canonical comparison.
+   */
+  hasRawCategory(brand: string | undefined, category: string): boolean {
+    const b = String(brand || '').trim().toLowerCase();
+    const c = category.trim().toLowerCase();
+    return this.browse.has(`${b}|${c}|1`) || this.browse.has(`${b}|${c}|0`);
   }
 
   browseRows(opts: { brand?: string; category?: string; availableOnly?: boolean }): number[] {

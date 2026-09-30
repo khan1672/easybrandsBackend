@@ -98,10 +98,14 @@ export class JsonlCatalog implements Catalog {
   private scopeRows(opts: BrowseOpts): number[] {
     const brands = normaliseBrands(opts.brands ?? (opts.brand ? [opts.brand] : undefined));
     const multiBrand = brands.length > 1;
-    const canonicalRequest = Boolean(
-      opts.category && canonicalCategory(opts.category) !== opts.category.trim(),
-    );
-    if (!multiBrand && !canonicalRequest) {
+    // The raw browse index can only answer a category request when that string
+    // is stored verbatim for the brand. A canonical name ("Ready to Wear") is
+    // usually not: Limelight stores "RTW", so a raw-key lookup would silently
+    // return nothing. Falling back to the full scan lets `inScope` compare
+    // canonical forms, which is what Mongo always does.
+    const rawCategoryHit =
+      !opts.category || this.store.hasRawCategory(brands[0], opts.category);
+    if (!multiBrand && rawCategoryHit) {
       return this.store.browseRows({
         brand: brands[0],
         category: opts.category,
@@ -178,31 +182,62 @@ export class JsonlCatalog implements Catalog {
     );
     return { paging: pagingOf(page, limit, all.length), items: slice(all, page, limit) };
   }
-
   async facets(opts: BrowseOpts): Promise<Facets> {
-    // Brand/price selections are excluded on purpose: a facet describes what is
-    // still selectable, not what the current selection already narrowed to.
-    const scope: BrowseOpts = { category: opts.category, availableOnly: opts.availableOnly };
+    // Same split as the Mongo catalog: the brand list is the "what can I still
+    // pick" list and ignores the active brand, while categories and the total
+    // describe the scope actually in view.
+    const chooserScope: BrowseOpts = { category: opts.category, availableOnly: opts.availableOnly };
+    const brands = normaliseBrands(opts.brands ?? (opts.brand ? [opts.brand] : undefined));
+    const scopedScope: BrowseOpts = {
+      category: opts.category,
+      availableOnly: opts.availableOnly,
+      brands,
+      brand: undefined,
+    };
     const counts = new Map<string, number>();
+    const tallies = new Map<string, { products: number; brands: Set<string> }>();
     let min = Number.POSITIVE_INFINITY;
     let max = 0;
     let total = 0;
-    for (const id of this.scopeRows(scope)) {
-      if (!this.inScope(scope, id)) continue;
+
+    for (const id of this.scopeRows(chooserScope)) {
+      if (!this.inScope(chooserScope, id)) continue;
+      const doc = this.store.docs[id];
+      if (!doc) continue;
+      const brand = String(doc.brand_name || '').trim();
+      if (brand) counts.set(brand, (counts.get(brand) ?? 0) + 1);
+    }
+
+    for (const id of this.scopeRows(scopedScope)) {
+      if (!this.inScope(scopedScope, id)) continue;
       const doc = this.store.docs[id];
       if (!doc) continue;
       total += 1;
-      const brand = String(doc.brand_name || '').trim();
-      if (brand) counts.set(brand, (counts.get(brand) ?? 0) + 1);
       const price = Number(doc.price);
       if (Number.isFinite(price) && price > 0) {
         if (price < min) min = price;
         if (price > max) max = price;
       }
+      const key = String(doc.category || '').trim();
+      const entry = tallies.get(key) ?? { products: 0, brands: new Set<string>() };
+      entry.products += 1;
+      const brand = String(doc.brand_name || '').trim();
+      if (brand) entry.brands.add(brand);
+      tallies.set(key, entry);
     }
+
     return {
       brands: [...counts.entries()]
         .map(([name, count]) => ({ name, count }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
+      categories: foldCategories(
+        [...tallies.entries()].map(([name, entry]) => ({
+          name,
+          products: entry.products,
+          brandNames: [...entry.brands],
+        })),
+      )
+        .map((c) => ({ name: c.name, slug: c.slug, count: c.products }))
         .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
       price: { min: Number.isFinite(min) ? min : 0, max },
       total,

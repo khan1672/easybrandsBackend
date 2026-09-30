@@ -2,7 +2,7 @@ import type { Catalog, BrowseOpts, BrowseResult, CategoryRow } from './catalog.j
 import type { ProductDoc } from '../types.js';
 import { buildMongoCollection, type MongoContext } from './mongo.js';
 import { canonicalCategory, foldCategories, type RawCategoryTally } from './categoryTaxonomy.js';
-import { scopeFilter, type Facets } from './productFilters.js';
+import { normaliseBrands, scopeFilter, type Facets } from './productFilters.js';
 import type { SortKey } from './productFilters.js';
 import {
   escapeRegex,
@@ -237,15 +237,23 @@ export class MongoCatalog implements Catalog {
   }
 
   async facets(opts: BrowseOpts): Promise<Facets> {
-    // Brand and price selections are intentionally ignored: a facet must list
-    // what can still be chosen, not what the current selection already cut down.
-    const filter: Record<string, unknown> = { available: { $ne: false } };
-    if (opts.category) Object.assign(filter, await this.categoryFilter(opts.category));
+    // Two different scopes on purpose, see the Facets docs: the brand list is
+    // the "what can I still pick" list, so it ignores the active brand, while
+    // the category list and the total describe what is actually in view.
+    const brands = normaliseBrands(opts.brands ?? (opts.brand ? [opts.brand] : undefined));
+    const chooserFilter = scopeFilter({
+      minPrice: opts.minPrice,
+      maxPrice: opts.maxPrice,
+      availableOnly: true,
+    });
+    if (opts.category) Object.assign(chooserFilter, await this.categoryFilter(opts.category));
+    const scopedFilter: Record<string, unknown> =
+      brands.length > 0 ? { ...chooserFilter, ...scopeFilter({ brands }) } : chooserFilter;
 
-    const [brandRows, bounds] = await Promise.all([
+    const [brandRows, bounds, categoryRows] = await Promise.all([
       this.col
         .aggregate([
-          { $match: filter },
+          { $match: chooserFilter },
           { $group: { _id: '$brand_name', count: { $sum: 1 } } },
           { $match: { _id: { $type: 'string', $ne: '' } } },
           { $sort: { count: -1, _id: 1 } },
@@ -253,12 +261,25 @@ export class MongoCatalog implements Catalog {
         .toArray() as Promise<{ _id: string; count: number }[]>,
       this.col
         .aggregate([
-          { $match: filter },
+          { $match: scopedFilter },
           { $group: { _id: null, min: { $min: '$price' }, max: { $max: '$price' }, total: { $sum: 1 } } },
         ])
         .toArray() as Promise<
           { _id: null; min: number | null; max: number | null; total: number }[]
         >,
+      this.col
+        .aggregate([
+          { $match: scopedFilter },
+          {
+            $group: {
+              _id: { $ifNull: ['$category', ''] },
+              products: { $sum: 1 },
+              brandNames: { $addToSet: '$brand_name' },
+            },
+          },
+          { $project: { _id: 0, name: '$_id', products: 1, brandNames: 1 } },
+        ])
+        .toArray() as Promise<RawCategoryTally[]>,
     ]);
 
     const row = bounds[0];
@@ -266,6 +287,11 @@ export class MongoCatalog implements Catalog {
     const max = Number(row?.max ?? 0);
     return {
       brands: brandRows.map((b) => ({ name: b._id, count: b.count })),
+      // Folded in TypeScript so the raw→canonical taxonomy rules stay in one
+      // place, shared with /categories.
+      categories: foldCategories(categoryRows)
+        .map((c) => ({ name: c.name, slug: c.slug, count: c.products }))
+        .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name)),
       // A category can legitimately contain only priceless products, in which
       // case there is no meaningful range to offer.
       price: { min: Number.isFinite(min) ? min : 0, max: Number.isFinite(max) ? max : 0 },
