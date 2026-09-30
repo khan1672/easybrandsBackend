@@ -1,11 +1,6 @@
 import { loadJsonl } from '../loaders/jsonl.js';
 import type { ProductDoc, BrandSummary } from '../types.js';
-
-const TOKEN_RE = /[A-Za-z0-9]+/g;
-
-function tokenize(text: string | null | undefined): string[] {
-  return String(text || '').toLowerCase().match(TOKEN_RE) || [];
-}
+import { scoreProduct, searchPhrase, searchTerms, tokenize } from './searchRelevance.js';
 
 /**
  * In-memory read model of the full catalog. Built once at boot from the
@@ -51,7 +46,9 @@ export class ProductStore {
         if (d.available !== false) push(`${brandKey}|${catKey}|1`, i);
       }
 
-      for (const tok of tokenize([d.title, d.category, ...(d.tags || []), d.description].join(' '))) {
+      for (const tok of tokenize(
+        [d.brand_name, d.title, d.category, ...(d.tags || []), d.description].join(' '),
+      )) {
         const arr = this.postings.get(tok);
         if (arr) arr.push(i);
         else this.postings.set(tok, [i]);
@@ -92,8 +89,9 @@ export class ProductStore {
   }
 
   searchRows(q: string, brand?: string, availableOnly = true): number[] {
-    const toks = tokenize(q);
+    const toks = searchTerms(q);
     if (toks.length === 0) return [];
+    const phrase = searchPhrase(toks);
     let candidate: number[] | null = null;
     for (const t of toks) {
       const ids = this.postings.get(t);
@@ -108,13 +106,20 @@ export class ProductStore {
       if (availableOnly && d.available === false) return false;
       return true;
     });
+    // Relevance first, then the shorter title (a more specific product), then
+    // price, so equal-relevance hits come back in a stable order.
     out.sort((x, y) => {
       const dx = this.docs[x]!;
       const dy = this.docs[y]!;
-      const sx = tokenize([dx.title, dx.category, ...(dx.tags || [])].join(' ')).filter((t) => toks.includes(t)).length;
-      const sy = tokenize([dy.title, dy.category, ...(dy.tags || [])].join(' ')).filter((t) => toks.includes(t)).length;
+      const sx = scoreProduct(dx, phrase, toks);
+      const sy = scoreProduct(dy, phrase, toks);
       if (sx !== sy) return sy - sx;
-      return 0;
+      const lx = String(dx.title || '').length;
+      const ly = String(dy.title || '').length;
+      if (lx !== ly) return lx - ly;
+      const px = Number.isFinite(dx.price) ? dx.price! : Infinity;
+      const py = Number.isFinite(dy.price) ? dy.price! : Infinity;
+      return px - py;
     });
     return out;
   }

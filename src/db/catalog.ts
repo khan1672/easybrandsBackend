@@ -140,11 +140,13 @@ export class JsonlCatalog implements Catalog {
 
   async search(q: string, opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>> {
     const ids = this.store.searchRows(q, opts.brand, opts.availableOnly !== false);
+    // `searchRows` already returns relevance order, so it is preserved here.
+    // Re-sorting by `opts.sort` would rank a price-ordered page above a better
+    // textual match, which is the opposite of what a search result should do.
     const docs = ids
       .filter((id) => this.inScope(opts, id))
       .map((i) => this.store.docs[i])
-      .filter((d): d is ProductDoc => Boolean(d))
-      .sort(compareBySort(opts.sort ?? 'price_asc'));
+      .filter((d): d is ProductDoc => Boolean(d));
     return { paging: pagingOf(page, limit, docs.length), items: slice(docs, page, limit) };
   }
 

@@ -9,6 +9,10 @@ export interface ProductDoc {
   currency?: string;
   available?: boolean;
   product_url?: string;
+  /** 'live' | 'dead' | 'unknown', written by scraping/check_product_links.py */
+  product_link_status?: string;
+  product_link_checked_at?: string;
+  product_link_http_status?: number;
   primary_image?: string;
   website?: string;
   scraped_at?: string;

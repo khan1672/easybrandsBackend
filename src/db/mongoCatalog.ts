@@ -4,6 +4,12 @@ import { buildMongoCollection, type MongoContext } from './mongo.js';
 import { canonicalCategory, foldCategories, type RawCategoryTally } from './categoryTaxonomy.js';
 import { scopeFilter, type Facets } from './productFilters.js';
 import type { SortKey } from './productFilters.js';
+import {
+  escapeRegex,
+  RELEVANCE_WEIGHTS,
+  searchPhrase,
+  searchTerms,
+} from './searchRelevance.js';
 
 /**
  * MongoDB-backed catalog. This is the source of truth when MONGO_URI is set:
@@ -97,14 +103,14 @@ export class MongoCatalog implements Catalog {
   }
 
   async search(q: string, opts: BrowseOpts, page: number, limit: number): Promise<BrowseResult<ProductDoc>> {
-    const terms = String(q || '')
-      .toLowerCase()
-      .match(/[a-z0-9]+/g) || [];
+    const terms = searchTerms(q);
     if (terms.length === 0) return { paging: { page, limit, offset: 0, total: 0 }, items: [] };
+    const phrase = searchPhrase(terms);
 
-    const and: Record<string, unknown>[] = terms.map((t) => ({
+    const and: Record<string, unknown>[] = terms.map((t: string) => ({
       $or: [
         { title: { $regex: t, $options: 'i' } },
+        { brand_name: { $regex: t, $options: 'i' } },
         { category: { $regex: t, $options: 'i' } },
         { tags: { $regex: t, $options: 'i' } },
         { description: { $regex: t, $options: 'i' } },
@@ -126,14 +132,71 @@ export class MongoCatalog implements Catalog {
     const docs = (await this.col
       .aggregate([
         { $match: filter },
-        { $addFields: { __sortPrice: { $cond: [{ $gt: [{ $ifNull: ['$price', 0] }, 0] }, '$price', 1e15] } } },
-        { $sort: this.sortStage(opts.sort) },
+        {
+          $addFields: {
+            __relevance: this.relevanceExpr(phrase, terms),
+            __titleLen: { $strLenCP: { $ifNull: ['$title', ''] } },
+            // Products with no real price must sort last, not first (Mongo
+            // sorts missing/null before numbers on an ascending price sort).
+            __sortPrice: { $cond: [{ $gt: [{ $ifNull: ['$price', 0] }, 0] }, '$price', 1e15] },
+          },
+        },
+        { $sort: { __relevance: -1, __titleLen: 1, ...this.sortStage(opts.sort) } },
         { $skip: (page - 1) * limit },
         { $limit: limit },
-        { $project: { __sortPrice: 0 } },
+        { $project: { __relevance: 0, __titleLen: 0, __sortPrice: 0 } },
       ])
       .toArray()) as ProductDoc[];
     return { paging: { page, limit, offset: (page - 1) * limit, total }, items: docs };
+  }
+
+  /**
+   * Server-side mirror of `scoreProduct`, built from the shared
+   * `RELEVANCE_WEIGHTS` so both catalogs rank the same results identically.
+   * Emitted as a `$cond` per tier that contributes its weight when the pattern
+   * matches, summed with `$add`.
+   */
+  private relevanceExpr(phrase: string, terms: string[]): Record<string, unknown> {
+    const W = RELEVANCE_WEIGHTS;
+    const title = '$title';
+    const brand = { $ifNull: ['$brand_name', ''] };
+    const category = { $ifNull: ['$category', ''] };
+    const description = { $ifNull: ['$description', ''] };
+
+    // `$regexMatch` only accepts a string, and `tags` is an array, so array
+    // matching maps the regex over the elements and reduces with
+    // `$anyElementTrue`. Doing it per element also keeps `^tag$` meaning
+    // "equals this whole tag" instead of "starts with the joined list".
+    const matches = (input: unknown, pattern: string): Record<string, unknown> => ({
+      $regexMatch: { input, regex: pattern, options: 'i' },
+    });
+    const anyTag = (pattern: string): Record<string, unknown> => ({
+      $anyElementTrue: {
+        $map: { input: { $ifNull: ['$tags', []] }, as: 'tag', in: matches('$$tag', pattern) },
+      },
+    });
+    const hit = (cond: unknown, weight: number): Record<string, unknown> => ({
+      $cond: [cond, weight, 0],
+    });
+
+    const p = escapeRegex(phrase);
+    const parts: unknown[] = [
+      hit(matches(brand, `^${p}$`), W.brandExact),
+      hit(matches(title, `^${p}`), W.titlePrefix),
+      hit(matches(title, p), W.titlePhrase),
+      hit(matches(brand, p), W.brandPhrase),
+      hit(anyTag(`^${p}$`), W.tagExact),
+      hit(anyTag(p), W.tagPhrase),
+      hit(matches(description, p), W.descriptionPhrase),
+    ];
+    for (const t of terms) {
+      const rx = escapeRegex(t);
+      parts.push(hit(matches(title, rx), W.termInTitle));
+      parts.push(hit(matches(brand, rx), W.termInBrand));
+      parts.push(hit(anyTag(rx), W.termInTag));
+      parts.push(hit(matches(category, rx), W.termInCategory));
+    }
+    return { $add: parts };
   }
 
   async brands(

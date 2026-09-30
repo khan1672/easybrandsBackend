@@ -46,6 +46,14 @@ export const normaliseBrands = (input: string | readonly string[] | undefined): 
   return [...seen];
 };
 
+/**
+ * Products whose storefront page no longer exists. ``check_product_links.py``
+ * marks these ``dead``; a shopper tapping one lands on the brand's own not-found
+ * page, so they are kept out of listings and facet counts. Stock is untouched:
+ * a product can be out of stock and still have a working page.
+ */
+const DELISTED_LINK_STATUS = 'dead';
+
 export interface ScopeFilters {
   brands?: readonly string[];
   minPrice?: number;
@@ -73,6 +81,9 @@ export const matchesScope = (doc: ProductDoc, filters: ScopeFilters): boolean =>
   if (filters.availableOnly !== false && doc.available === false) {
     return false;
   }
+  if (doc.product_link_status === DELISTED_LINK_STATUS) {
+    return false;
+  }
   const price = Number(doc.price);
   const hasPrice = Number.isFinite(price);
   if (typeof filters.minPrice === 'number' && Number.isFinite(filters.minPrice)) {
@@ -91,6 +102,7 @@ export const scopeFilter = (filters: ScopeFilters): Record<string, unknown> => {
   if (brands.length === 1) filter.brand_name = brands[0];
   else if (brands.length > 1) filter.brand_name = { $in: brands };
   if (filters.availableOnly !== false) filter.available = { $ne: false };
+  filter.product_link_status = { $ne: DELISTED_LINK_STATUS };
   const bounds = priceBounds(filters);
   if (Object.keys(bounds).length > 0) filter.price = bounds;
   return filter;
