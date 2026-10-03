@@ -30,7 +30,7 @@ async function main(): Promise<void> {
     console.log(`[boot] mongo source ready  db=${env.mongoDb}  coll=${env.mongoCollection}  indexes=[${indexes.join(',')}]`);
   }
 
-  const app = createApp({ catalog, requestLog: env.requestLog });
+  const app = createApp({ catalog, env, requestLog: env.requestLog });
   const server = app.listen(env.port, env.host, () => {
     console.log(`[boot] easybrands API ready  http://${env.host}:${env.port}`);
     console.log(`[boot] jsonl_docs=${store.count}  boot=${bootMs}ms  source=${source}`);

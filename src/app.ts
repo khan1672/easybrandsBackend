@@ -4,9 +4,11 @@ import type { Catalog } from './db/catalog.js';
 import { createRouter } from './routes/index.js';
 import { errorHandler, notFound } from './middleware/error.js';
 import { requestLog } from './middleware/request-log.js';
+import type { Env } from './config/env.js';
 
 export interface AppContext {
   catalog: Catalog;
+  env: Env;
   requestLog?: boolean;
 }
 
@@ -15,6 +17,8 @@ export function createApp(ctx: AppContext): Express {
   app.disable('x-powered-by');
 
   app.use(requestLog(ctx.requestLog !== false));
+  // Chat accepts up to 20 messages of 2,000 chars, so 64kb leaves headroom.
+  app.use(express.json({ limit: '64kb' }));
 
   app.get('/', (_req, res) => {
     void ctx.catalog.brandCount().then((brands) => {
@@ -27,6 +31,7 @@ export function createApp(ctx: AppContext): Express {
           products: '/api/v1/products?brand=&category=&available=&page=&limit=',
           product: '/api/v1/products/:slug',
           search: '/api/v1/products/search?q=&brand=&available=&page=&limit=',
+          chat: 'POST /api/v1/chat (SSE)',
         },
         brands,
       });

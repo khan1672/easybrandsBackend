@@ -11,6 +11,20 @@ export interface Env {
   mongoDb: string;
   mongoCollection: string;
   requestLog: boolean;
+  /** Server-side only. Never exposed to the mobile client. */
+  openaiApiKey: string;
+  openaiBaseUrl: string;
+  chatModel: string;
+  /** Upper bound on tool round-trips per reply, so a loop cannot run away. */
+  chatMaxToolSteps: number;
+  /** Requests per window, per client, for the paid chat endpoint. */
+  chatRateLimit: number;
+  chatRateWindowMs: number;
+}
+
+function positiveInt(value: unknown, fallback: number) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function stringFrom(value: unknown, fallback: string) {
@@ -49,5 +63,11 @@ export default function loadEnv(): Env {
     mongoDb: stringFrom(process.env.MONGO_DB, 'easybrands'),
     mongoCollection: stringFrom(process.env.MONGO_COLLECTION, 'products'),
     requestLog: stringFrom(process.env.REQUEST_LOG, 'true') !== 'false',
+    openaiApiKey: stringFrom(process.env.OPENAI_API_KEY, ''),
+    openaiBaseUrl: stringFrom(process.env.OPENAI_BASE_URL, 'https://api.openai.com/v1'),
+    chatModel: stringFrom(process.env.CHAT_MODEL, 'gpt-4o-mini'),
+    chatMaxToolSteps: positiveInt(process.env.CHAT_MAX_TOOL_STEPS, 4),
+    chatRateLimit: positiveInt(process.env.CHAT_RATE_LIMIT, 20),
+    chatRateWindowMs: positiveInt(process.env.CHAT_RATE_WINDOW_MS, 60_000),
   };
 }
