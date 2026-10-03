@@ -27,9 +27,9 @@ function parseMessages(body: unknown): ChatMessage[] | null {
 
 export function chat(env: Env, catalog: Catalog) {
   return async (req: Request, res: Response): Promise<void> => {
-    if (!env.openaiApiKey) {
+    if (!env.geminiApiKey) {
       res.status(503).json({
-        error: 'Chat is not configured. Set OPENAI_API_KEY on the API server.',
+        error: 'Chat is not configured. Set GEMINI_API_KEY on the API server.',
         code: 'chat_not_configured',
       });
       return;
@@ -68,10 +68,9 @@ export function chat(env: Env, catalog: Catalog) {
         catalog,
         messages,
         {
-          apiKey: env.openaiApiKey,
-          baseUrl: env.openaiBaseUrl,
+          apiKey: env.geminiApiKey,
+          baseUrl: env.geminiBaseUrl,
           model: env.chatModel,
-          maxToolSteps: env.chatMaxToolSteps,
           signal: controller.signal,
         },
         emit,

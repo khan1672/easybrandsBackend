@@ -14,36 +14,6 @@ export interface SearchProductsArgs {
   sort?: 'relevance' | 'price_asc' | 'price_desc';
 }
 
-/** Tool schema sent to the model. Kept deliberately small and explicit. */
-export const searchProductsTool = {
-  type: 'function' as const,
-  function: {
-    name: 'search_products',
-    description:
-      'Search the real product catalog. Returns matching products with their exact ' +
-      'id, brand, name, price, currency, category and stock. Use this before ' +
-      'recommending anything: never invent a product, price, or brand.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Free-text search, e.g. "lawn suit".' },
-        brand: { type: 'string', description: 'Exact brand name. Omit to search all brands.' },
-        category: { type: 'string', description: 'Exact category name. Omit for all categories.' },
-        minPrice: { type: 'number', description: 'Inclusive minimum price in PKR.' },
-        maxPrice: { type: 'number', description: 'Inclusive maximum price in PKR.' },
-        limit: { type: 'number', description: 'How many products to return. 1-20, default 8.' },
-        sort: {
-          type: 'string',
-          enum: ['relevance', 'price_asc', 'price_desc'],
-          description: 'Result ordering. Default relevance.',
-        },
-      },
-      required: [],
-    },
-  },
-};
-
-export const chatTools = [searchProductsTool];
 
 const MAX_LIMIT = 20;
 const DEFAULT_LIMIT = 8;
@@ -158,4 +128,4 @@ export const describeProducts = (products: ChatProduct[]): string => {
     .join('\n');
 };
 
-export default { searchProductsTool, chatTools, runSearchProducts, toChatProduct, describeProducts };
+export default { runSearchProducts, toChatProduct, describeProducts };
