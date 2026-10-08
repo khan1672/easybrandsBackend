@@ -19,11 +19,20 @@ export default async function handler(req, res) {
     app = await pending;
   } catch (err) {
     pending = null;
-    console.error('[fatal] boot failed', err);
-    if (!res.headersSent) res.statusCode = 503;
+    // Full detail (host names, driver message, cause) goes to the function log.
+    // The response gets only a coarse code, which is what makes a bare 503
+    // diagnosable without reading logs.
+    console.error('[fatal] boot failed', err, err?.cause ?? '(no cause)');
+    const code =
+      typeof err?.code === 'string' && err.code.length > 0 ? err.code : 'boot_failed';
+    if (!res.headersSent) {
+      res.statusCode = 503;
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+    }
     res.end(
       JSON.stringify({
         error: 'catalog_unavailable',
+        code,
         message: 'The product catalogue could not be loaded. Please retry.',
       }),
     );

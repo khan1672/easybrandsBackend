@@ -2,7 +2,7 @@ import fs from 'node:fs';
 
 import { buildStore, ProductStore } from './db/store.js';
 import { JsonlCatalog, seedMongoFromJsonl, type Catalog } from './db/catalog.js';
-import { buildMongoCollection } from './db/mongo.js';
+import { buildMongoCollection, type MongoContext } from './db/mongo.js';
 import { MongoCatalog } from './db/mongoCatalog.js';
 import loadEnv, { type Env } from './config/env.js';
 
@@ -13,6 +13,27 @@ export interface Backend {
   store: ProductStore | null;
   source: 'jsonl' | 'mongodb';
   bootMs: number;
+}
+
+/**
+ * Why the catalogue could not be started.
+ *
+ * The API deliberately does not tell callers *how* it is configured — no host
+ * names, no database names, no connection strings — but a deploy that answers
+ * 503 with no clue at all is undiagnosable from the outside. These codes are
+ * the minimum that lets a health check name the fault; the full error and its
+ * cause go to the function log, which is not public.
+ */
+export type BootErrorCode = 'catalog_not_configured' | 'catalog_empty' | 'mongo_unreachable';
+
+export class BootError extends Error {
+  readonly code: BootErrorCode;
+
+  constructor(code: BootErrorCode, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'BootError';
+    this.code = code;
+  }
 }
 
 /**
@@ -45,14 +66,35 @@ export async function createBackend(env: Env = loadEnv()): Promise<Backend> {
   // Mongo is the source of truth whenever MONGO_URI is set. If it is not
   // reachable we refuse to silently serve stale data: boot fails loudly.
   if (env.mongoUri) {
-    const ctx = await buildMongoCollection(env);
-    const total = await ctx.count();
+    let ctx: MongoContext;
+    try {
+      ctx = await buildMongoCollection(env);
+    } catch (err) {
+      // The driver's message carries the host and the reason; it belongs in
+      // the function log, never in a response body.
+      console.error('[boot] mongo connect failed', err);
+      throw new BootError(
+        'mongo_unreachable',
+        'MONGO_URI is set but MongoDB did not accept the connection',
+        { cause: err },
+      );
+    }
+    let total: number;
+    try {
+      total = await ctx.count();
+    } catch (err) {
+      console.error('[boot] mongo count failed', err);
+      throw new BootError('mongo_unreachable', 'MongoDB accepted the connection but the read failed', {
+        cause: err,
+      });
+    }
     if (total === 0) {
       // Seeding is the one thing that genuinely needs the file. On a serverless
       // deploy there is no JSONL to seed from, so say what is wrong rather than
       // serving an empty catalogue that looks like a healthy install.
       if (!store) {
-        throw new Error(
+        throw new BootError(
+          'catalog_empty',
           `mongodb collection "${env.mongoDb}.${env.mongoCollection}" is empty and no JSONL ` +
             `is available at DATA_FILE (${env.dataFile}) to seed it from`,
         );
@@ -66,7 +108,10 @@ export async function createBackend(env: Env = loadEnv()): Promise<Backend> {
   }
 
   if (!store) {
-    throw new Error(`no DATA_FILE at ${env.dataFile} and MONGO_URI is not set, so there is no catalog to serve`);
+    throw new BootError(
+      'catalog_not_configured',
+      `no DATA_FILE at ${env.dataFile} and MONGO_URI is not set, so there is no catalog to serve`,
+    );
   }
   return { catalog: new JsonlCatalog(store), env, store, source: 'jsonl', bootMs };
 }
