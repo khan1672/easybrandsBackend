@@ -11,11 +11,17 @@ export interface Env {
   mongoDb: string;
   mongoCollection: string;
   requestLog: boolean;
+  /**
+   * Hops in front of us that may set x-forwarded-for. Must be right behind a
+   * proxy (1 on Vercel, 0 for a direct `node dist/server.js`), otherwise
+   * Express reports every caller as the proxy itself and the chat rate limit
+   * collapses into one shared bucket keyed by an IP nobody has.
+   */
+  trustProxy: number;
   /** Server-side only. Never exposed to the mobile client. */
   geminiApiKey: string;
   geminiBaseUrl: string;
   chatModel: string;
-  /** Upper bound on tool round-trips per reply, so a loop cannot run away. */
   /** Requests per window, per client, for the paid chat endpoint. */
   chatRateLimit: number;
   chatRateWindowMs: number;
@@ -53,10 +59,16 @@ export default function loadEnv(): Env {
     stringFrom(process.env.DATA_FILE, '../data/raw_products.jsonl'),
   );
 
+  // VERCEL is set by the platform, so a deploy gets the right default without
+  // needing an env var configured; running locally stays direct (0).
+  const trustProxyDefault = process.env.VERCEL ? 1 : 0;
+  const trustProxy = Number.parseInt(stringFrom(process.env.TRUST_PROXY, String(trustProxyDefault)), 10);
+
   return {
     port: Number.isFinite(port) && port > 0 ? port : 8787,
     host: stringFrom(process.env.HOST, '127.0.0.1'),
     dataFile,
+    trustProxy: Number.isFinite(trustProxy) && trustProxy >= 0 ? trustProxy : 0,
     atlas: stringFrom(process.env.ATLAS, '') === 'auto' ? 'auto' : 'off',
     mongoUri: stringFrom(process.env.MONGO_URI, ''),
     mongoDb: stringFrom(process.env.MONGO_DB, 'easybrands'),

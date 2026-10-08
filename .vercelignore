@@ -1,0 +1,7 @@
+# Credentials must never leave the machine. `.env` is gitignored, but Vercel
+# uploads files independently of git, so it needs its own ignore file.
+.env
+.env.*
+!.env.example
+node_modules
+.git

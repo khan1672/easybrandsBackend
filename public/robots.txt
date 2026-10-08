@@ -1,0 +1,9 @@
+# Static output directory for Vercel (see vercel.json).
+#
+# Vercel serves files BEFORE it applies rewrites, so this directory must never
+# hold the build output: `dist/` is the whole compiled API and would be
+# downloadable at /server.js, /config/env.js and so on. Nothing but this file
+# lives here, so every real request falls through to the catch-all rewrite and
+# reaches the Express app in api/index.js.
+User-agent: *
+Disallow:

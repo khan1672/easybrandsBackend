@@ -15,6 +15,9 @@ export interface AppContext {
 export function createApp(ctx: AppContext): Express {
   const app = express();
   app.disable('x-powered-by');
+  // Required behind Vercel's proxy: without it Express reads the proxy's IP as
+  // req.ip, so the chat rate limiter would key everyone to one bucket.
+  app.set('trust proxy', ctx.env.trustProxy);
 
   app.use(requestLog(ctx.requestLog !== false));
   // Chat accepts up to 20 messages of 2,000 chars, so 64kb leaves headroom.
