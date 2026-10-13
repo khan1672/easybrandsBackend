@@ -6,3 +6,5 @@ data/*.jsonl
 npm-debug.log*
 dist/
 test/
+.vercel
+.env*.local
