@@ -18,6 +18,12 @@ export interface Env {
    * collapses into one shared bucket keyed by an IP nobody has.
    */
   trustProxy: number;
+  /**
+   * Client gate. The mobile app sends both as headers (x-app-key,
+   * x-app-secret) on every request; a missing or wrong pair is 401.
+   */
+  appKey: string;
+  appSecret: string;
   /** Server-side only. Never exposed to the mobile client. */
   geminiApiKey: string;
   geminiBaseUrl: string;
@@ -74,6 +80,8 @@ export default function loadEnv(): Env {
     mongoDb: stringFrom(process.env.MONGO_DB, 'easybrands'),
     mongoCollection: stringFrom(process.env.MONGO_COLLECTION, 'products'),
     requestLog: stringFrom(process.env.REQUEST_LOG, 'true') !== 'false',
+    appKey: stringFrom(process.env.APP_KEY, ''),
+    appSecret: stringFrom(process.env.APP_SECRET, ''),
     geminiApiKey: stringFrom(process.env.GEMINI_API_KEY, ''),
     geminiBaseUrl: stringFrom(
       process.env.GEMINI_BASE_URL,

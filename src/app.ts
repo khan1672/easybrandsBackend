@@ -4,6 +4,7 @@ import type { Catalog } from './db/catalog.js';
 import { createRouter } from './routes/index.js';
 import { errorHandler, notFound } from './middleware/error.js';
 import { requestLog } from './middleware/request-log.js';
+import { authenticate } from './middleware/authenticate.js';
 import type { Env } from './config/env.js';
 
 export interface AppContext {
@@ -22,6 +23,9 @@ export function createApp(ctx: AppContext): Express {
   app.use(requestLog(ctx.requestLog !== false));
   // Chat accepts up to 20 messages of 2,000 chars, so 64kb leaves headroom.
   app.use(express.json({ limit: '64kb' }));
+
+  // Every route requires the two client headers; anything else is 401.
+  app.use(authenticate(ctx.env));
 
   app.get('/', (_req, res) => {
     void ctx.catalog.brandCount().then((brands) => {
