@@ -68,7 +68,58 @@ const TRANSIENT_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 
 const RETRYABLE_ERRORS = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND']);
 
-const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+/** How long the provider may stay silent before the catalogue fallback takes over. */
+const PROVIDER_DEADLINE_MS = 10_000;
+
+/** Waits, but gives up immediately if the caller (or the deadline) aborts. */
+const wait = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    function onAbort(): void {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+
+interface Deadline {
+  signal: AbortSignal;
+  clear: () => void;
+}
+
+/**
+ * An abort signal that fires after `ms`, forwarding the caller's cancellation.
+ *
+ * Gemini normally answers in a second or two. When it instead accepts the
+ * connection and then says nothing, this is what turns the wait into the
+ * catalogue fallback rather than a bubble that never resolves.
+ */
+function createDeadline(parent: AbortSignal | undefined, ms: number): Deadline {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('The provider timed out.', 'TimeoutError')),
+    ms,
+  );
+  const forward = (): void => controller.abort(parent?.reason);
+  if (parent) {
+    if (parent.aborted) forward();
+    else parent.addEventListener('abort', forward, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    clear: () => {
+      clearTimeout(timer);
+      parent?.removeEventListener('abort', forward);
+    },
+  };
+}
 
 /**
  * Opens the stream, retrying the statuses Gemini returns while it is busy.
@@ -82,13 +133,14 @@ async function fetchWithBackoff(
   url: string,
   body: string,
   options: ChatOptions,
+  signal: AbortSignal,
 ): Promise<Response> {
   const maxAttempts = 4;
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (options.signal?.aborted) {
-      throw new DOMException('The operation was aborted.', 'AbortError');
+    if (signal.aborted) {
+      throw signal.reason ?? new DOMException('The operation was aborted.', 'AbortError');
     }
 
     let response: Response | null = null;
@@ -101,12 +153,13 @@ async function fetchWithBackoff(
           'x-goog-api-key': options.apiKey,
         },
         body,
-        signal: options.signal,
+        signal,
       });
     } catch (error) {
       lastError = error;
-      // A cancellation is the user's own doing, so it is never retried.
-      if ((error as { name?: string }).name === 'AbortError') throw error;
+      // Cancellation (the shopper leaving, or the deadline above) is final.
+      const name = (error as { name?: string }).name;
+      if (name === 'AbortError' || name === 'TimeoutError' || signal.aborted) throw error;
       if (!RETRYABLE_ERRORS.has((error as { code?: string }).code ?? '')) throw error;
     }
 
@@ -122,17 +175,7 @@ async function fetchWithBackoff(
 
     // Exponential backoff, ~0.4s / 0.8s / 1.6s, plus jitter to avoid a stampede.
     const delay = 400 * 2 ** (attempt - 1) + Math.floor(Math.random() * 250);
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, delay);
-      options.signal?.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          reject(new DOMException('The operation was aborted.', 'AbortError'));
-        },
-        { once: true },
-      );
-    });
+    await wait(delay, signal);
   }
 
   throw lastError instanceof Error
@@ -191,50 +234,63 @@ async function writeReply(
     },
   });
 
-  const response = await fetchWithBackoff(url, body, options);
-  if (!response.body) {
-    throw new Error('Chat provider returned an empty response');
-  }
+  const deadline = createDeadline(options.signal, PROVIDER_DEADLINE_MS);
 
-  let text = '';
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+  try {
+    const response = await fetchWithBackoff(url, body, options, deadline.signal);
+    if (!response.body) {
+      throw new Error('Chat provider returned an empty response');
+    }
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    let text = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let started = false;
 
-    // SSE frames are separated by a blank line.
-    const frames = buffer.split('\n\n');
-    buffer = frames.pop() ?? '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-    for (const frame of frames) {
-      const line = frame.split('\n').find(l => l.startsWith('data:'));
-      if (!line) continue;
-      const payload = line.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
+      // SSE frames are separated by a blank line.
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
 
-      let parsed: GeminiChunk;
-      try {
-        parsed = JSON.parse(payload) as GeminiChunk;
-      } catch {
-        continue;
-      }
+      for (const frame of frames) {
+        const line = frame.split('\n').find(l => l.startsWith('data:'));
+        if (!line) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
 
-      for (const part of parsed.candidates?.[0]?.content?.parts ?? []) {
-        // `thought` parts are the model's private reasoning and never reach the
-        // shopper, or the app renders the monologue.
-        if (typeof part.text === 'string' && part.text !== '' && part.thought !== true) {
-          text += part.text;
-          onDelta(part.text);
+        let parsed: GeminiChunk;
+        try {
+          parsed = JSON.parse(payload) as GeminiChunk;
+        } catch {
+          continue;
+        }
+
+        for (const part of parsed.candidates?.[0]?.content?.parts ?? []) {
+          // `thought` parts are the model's private reasoning and never reach the
+          // shopper, or the app renders the monologue.
+          if (typeof part.text === 'string' && part.text !== '' && part.thought !== true) {
+            if (!started) {
+              // The model is answering: the rest of the stream may take as long
+              // as it needs.
+              started = true;
+              deadline.clear();
+            }
+            text += part.text;
+            onDelta(part.text);
+          }
         }
       }
     }
-  }
 
-  return text;
+    return text;
+  } finally {
+    deadline.clear();
+  }
 }
 
 /** Replies that need no catalogue and no model. */
@@ -247,6 +303,28 @@ function cannedReply(question: string): string | null {
     return 'Happy to help. Ask me for anything else you are looking for.';
   }
   return null;
+}
+
+/**
+ * A factual reply that needs no model.
+ *
+ * The cards are emitted before the model is called, so a provider outage (quota,
+ * 429, 5xx) or an empty completion must not turn into an error bubble: the
+ * shopper still has the products and this line explains them.
+ */
+function fallbackReply(products: ChatProduct[], providerFailed: boolean): string {
+  const lead = providerFailed ? 'The stylist is busy right now. ' : '';
+  if (products.length === 0) {
+    return `${lead}I could not find anything matching that in the catalogue. Try widening the budget or the category.`;
+  }
+  const first = products[0];
+  const price =
+    first && typeof first.price === 'number' ? `PKR ${first.price}` : 'an unpublished price';
+  const title = [first?.brand, first?.name].filter(part => part && part !== '').join(' ');
+  const others = products.length - 1;
+  return `${lead}${title} at ${price}.${
+    others > 0 ? ` Plus ${others} more matching ${others === 1 ? 'piece' : 'pieces'}.` : ''
+  } Tap a card for the details.`;
 }
 
 /**
@@ -304,24 +382,31 @@ export async function runChat(
       emit({ type: 'products', products: [product] });
     }
 
-    const reply = await writeReply(options, intent, question, products, text =>
-      emit({ type: 'delta', text }),
-    );
+    let streamed = false;
+    let reply: string;
+    try {
+      reply = await writeReply(options, intent, question, products, text => {
+        streamed = true;
+        emit({ type: 'delta', text });
+      });
+    } catch (error) {
+      // A cancellation is the user's own doing; the outer handler reports it.
+      if ((error as { name?: string }).name === 'AbortError') throw error;
+      console.warn(
+        '[chat] provider unavailable; sending catalogue fallback:',
+        (error as Error).message,
+      );
+      // If some text already reached the shopper, keep it; otherwise explain
+      // the cards that are already on screen instead of showing an error.
+      if (!streamed) emit({ type: 'delta', text: fallbackReply(products, true) });
+      emit({ type: 'done' });
+      return;
+    }
 
     if (reply.trim() === '') {
       // Fall back to a factual summary rather than an empty bubble: the products
       // are already on screen, so the shopper is not left guessing.
-      emit({
-        type: 'delta',
-        text:
-          products.length === 0
-            ? 'I could not find anything matching that in the catalogue right now. Try widening the budget or the category.'
-            : `I found ${products.length} matching ${
-                products.length === 1 ? 'piece' : 'pieces'
-              }. They are shown above, from ${products[0]?.brand} at PKR ${
-                products[0]?.price ?? 'an unpublished price'
-              } onwards.`,
-      });
+      emit({ type: 'delta', text: fallbackReply(products, false) });
     }
 
     emit({ type: 'done' });
